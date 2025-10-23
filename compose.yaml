@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # 1. DỊCH VỤ CƠ SỞ DỮ LIỆU CHO AIRFLOW & MLFLOW (Postgres)
+  postgres:
+    image: postgres:14
+    container_name: postgres_db
+    environment:
+      - POSTGRES_USER=mlops_user
+      - POSTGRES_PASSWORD=mlops_pass
+      - POSTGRES_DB=mlops_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mlops_net
+    restart: always
+    ports:
+      - "5432:5432"  # Mở cổng 5432 bên trong ra cổng 5432 trên máy Host
+
+  # 2. MLFLOW TRACKING SERVER
+  mlflow:
+    #image: ghcr.io/mlflow/mlflow:latest
+    build: ./mlflow_custom
+    container_name: mlflow_server
+    user: root
+    ports:
+      - "5000:5000" # Cổng UI MLflow
+    environment:
+      # Kết nối MLflow với Postgres
+      - MLFLOW_TRACKING_URI=postgresql://mlops_user:mlops_pass@postgres:5432/mlops_db
+      #- MLFLOW_S3_ENDPOINT_URL=file:///opt/mlflow/artifacts
+      - MLFLOW_ALLOWED_HOSTS=127.0.0.1,localhost,mlflow
+    volumes:
+      - ./mlruns:/home/jovyan/mlruns  # Nơi lưu trữ artifacts
+    networks:
+      mlops_net:
+        aliases:
+          - mlflow
+    depends_on:
+      - postgres
+    restart: always
+    command: >
+      /bin/bash -c "sleep 10 && mlflow server
+      --host 0.0.0.0
+      --backend-store-uri postgresql://mlops_user:mlops_pass@postgres:5432/mlops_db
+      --default-artifact-root file:///home/jovyan/mlruns"
+
+  # 3. MÔI TRƯỜNG PHÁT TRIỂN (JupyterLab)
+  jupyterlab:
+    image: jupyter/scipy-notebook:latest # Hoặc jupyter/tensorflow-notebook
+    container_name: jupyter_dev
+    user: root # Có thể cần root để giải quyết vấn đề quyền truy cập volume trong rootless podman
+    ports:
+      - "8888:8888" # Cổng UI Jupyter
+    volumes:
+      - ./jupyter-notebooks:/home/jovyan/work
+      - ./mlruns:/home/jovyan/mlruns # Truy cập vào thư mục artifacts
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000 # Kết nối đến MLflow server
+      - GRANT_SUDO=yes
+    networks:
+      - mlops_net
+    depends_on:
+      - mlflow # Đảm bảo MLflow sẵn sàng trước khi Jupyter khởi động
+    restart: unless-stopped
+
+  # 4. HỆ THỐNG HÀNG ĐỢI/CACHING (Redis)
+  redis:
+    image: redis:latest
+    container_name: redis_cache
+    networks:
+      - mlops_net
+    restart: always
+    ports:
+      - "6379:6379" # Mở cổng 6379 Host -> 6379 Container
+
+  # 5. DỊCH VỤ PHỤC VỤ MÔ HÌNH (FastAPI - Không chạy sẵn, chỉ là mẫu)
+  # FastAPI thường được triển khai sau khi mô hình được train.
+  # Bạn sẽ BUILD một image riêng cho FastAPI có chứa mô hình đã train.
+  # fastapi_server:
+  #   build: ./fastapi_service # Sử dụng Dockerfile riêng
+  #   container_name: model_api
+  #   ports:
+  #     - "8000:8000"
+  #   networks:
+  #     - mlops_net
+  #   depends_on:
+  #     - redis
+  #     - mlflow 
+  #   restart: always
+
+volumes:
+  postgres_data:
+  
+networks:
+  mlops_net:
+    driver: bridge # Tạo một mạng nội bộ cho các container
