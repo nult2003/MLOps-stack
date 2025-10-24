@@ -31,7 +31,7 @@ services:
       #- MLFLOW_S3_ENDPOINT_URL=file:///opt/mlflow/artifacts
       - MLFLOW_ALLOWED_HOSTS=127.0.0.1,localhost,mlflow
     volumes:
-      - ./mlruns:/home/jovyan/mlruns  # Nơi lưu trữ artifacts
+      - ./mlruns:/opt/mlflow/artifacts  # Nơi lưu trữ artifacts
     networks:
       mlops_net:
         aliases:
@@ -43,7 +43,7 @@ services:
       /bin/bash -c "sleep 10 && mlflow server
       --host 0.0.0.0
       --backend-store-uri postgresql://mlops_user:mlops_pass@postgres:5432/mlops_db
-      --default-artifact-root file:///home/jovyan/mlruns"
+      --default-artifact-root file:///opt/mlflow/artifacts"
 
   # 3. MÔI TRƯỜNG PHÁT TRIỂN (JupyterLab)
   jupyterlab:
@@ -89,6 +89,81 @@ services:
   #     - mlflow 
   #   restart: always
 
+# === DỊCH VỤ AIRFLOW ===  
+  # 1. Dịch vụ Init (Khởi tạo Database và User)
+  airflow_init:
+    #image: apache/airflow:2.8.2-python3.11 # Chọn phiên bản ổn định
+    build: 
+      context: ./airflow_custom
+      dockerfile: Dockerfile # Chỉ định Dockerfile đã tạo
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    # Lệnh: Khởi tạo DB (migrate) và tạo User Admin mặc định
+    command: ["-c", "airflow db migrate && airflow users create --username airflow --password airflow --firstname Airflow --lastname Admin --role Admin --email admin@example.com"]
+    environment:
+      # Airflow Metastore URI: Dùng cùng username/pass với Postgres hiện tại
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql://mlops_user:mlops_pass@postgres:5432/airflow_db 
+      # Cấu hình DAGs folder
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__WEBSERVER__HOST=0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_started # Đảm bảo Postgres sẵn sàng
+    volumes:
+      - ./dags:/opt/airflow/dags # Mount thư mục DAGs trên Host
+      - ./mlruns:/opt/airflow/mlruns
+    networks:
+      - mlops_net
+    restart: "no" # Chỉ chạy một lần
+
+  # 2. Dịch vụ Webserver (Giao diện UI)
+  airflow_webserver:
+    #image: apache/airflow:2.8.2-python3.11
+    build: 
+      context: ./airflow_custom
+      dockerfile: Dockerfile # Chỉ định Dockerfile đã tạo
+    container_name: airflow_webserver
+    ports:
+      - "8080:8080" # Cổng Airflow UI
+    command: ["airflow", "webserver"]
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql://mlops_user:mlops_pass@postgres:5432/airflow_db
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor # Sử dụng LocalExecutor cho môi trường Dev
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__WEBSERVER__HOST=0.0.0.0
+    depends_on:
+      airflow_init:
+        condition: service_completed_successfully # Phải chạy sau init
+      mlflow:
+        condition: service_started # Đảm bảo MLflow sẵn sàng
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./mlruns:/opt/airflow/mlruns
+    networks:
+      - mlops_net
+    restart: always
+
+  # 3. Dịch vụ Scheduler (Lên lịch)
+  airflow_scheduler:
+    #image: apache/airflow:2.8.2-python3.11
+    build: 
+      context: ./airflow_custom
+      dockerfile: Dockerfile # Chỉ định Dockerfile đã tạo
+    container_name: airflow_scheduler
+    command: ["airflow", "scheduler"]
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql://mlops_user:mlops_pass@postgres:5432/airflow_db
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+    depends_on:
+      airflow_webserver:
+        condition: service_started
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./mlruns:/opt/airflow/mlruns
+    networks:
+      - mlops_net
+    restart: always
 volumes:
   postgres_data:
   
